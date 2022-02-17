@@ -37,9 +37,9 @@ declare global {
 
 export interface SignalState<T> {
   value?: T;
-  observers: Computation<any>[] | null;
-  observerSlots: number[] | null;
-  pending: T | {};
+  observers?: Computation<any>[] | null;
+  observerSlots?: number[] | null;
+  pending?: T | {};
   tValue?: T;
   comparator?: (prev: T, next: T) => boolean;
   name?: string;
@@ -50,7 +50,7 @@ export interface Owner {
   cleanups: (() => void)[] | null;
   owner: Owner | null;
   context: any | null;
-  sourceMap?: Record<string, { value: unknown }>;
+  sourceMap?: Record<string, SignalState<any>>;
   name?: string;
   componentName?: string;
 }
@@ -173,7 +173,7 @@ export function createSignal<T>(value?: T, options?: SignalOptions<T>): Signal<T
   };
 
   if ("_SOLID_DEV_" && !options.internal)
-    s.name = registerGraph(options.name || hashValue(value), s as { value: unknown });
+    s.name = registerGraph(options.name || hashValue(value), s);
 
   const setter: Setter<T | undefined> = (value: unknown) => {
     if (typeof value === "function") {
@@ -1028,7 +1028,7 @@ export function hashValue(v: any): string {
   }`;
 }
 
-export function registerGraph(name: string, value: { value: unknown }): string {
+export function registerGraph(name: string, value: { value?: any }): string {
   let tryName = name;
   if (Owner) {
     let i = 0;
@@ -1232,7 +1232,7 @@ export function writeSignal(node: SignalState<any> | Memo<any>, value: any, isCo
   return value;
 }
 
-function updateComputation(node: Computation<any>) {
+export function updateComputation(node: Computation<any>) {
   if (!node.fn) return;
   cleanNode(node);
   const owner = Owner,
@@ -1259,7 +1259,7 @@ function updateComputation(node: Computation<any>) {
   Owner = owner;
 }
 
-function runComputation(node: Computation<any>, value: any, time: number) {
+export function runComputation(node: Computation<any>, value: any, time: number) {
   let nextValue;
   try {
     nextValue = node.fn(value);
@@ -1277,7 +1277,7 @@ function runComputation(node: Computation<any>, value: any, time: number) {
   }
 }
 
-function createComputation<Next, Init = unknown>(
+export function createComputation<Next, Init = unknown>(
   fn: EffectFunction<Init | Next, Next>,
   init: Init,
   pure: boolean,
@@ -1618,7 +1618,7 @@ function hash(s: string) {
   return `${h ^ (h >>> 9)}`;
 }
 
-function serializeValues(sources: Record<string, { value: unknown }> = {}) {
+function serializeValues(sources: Record<string, SignalState<any>> = {}) {
   const k = Object.keys(sources);
   const result: Record<string, unknown> = {};
   for (let i = 0; i < k.length; i++) {
