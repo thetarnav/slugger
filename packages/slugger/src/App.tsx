@@ -1,4 +1,4 @@
-import { Component, createEffect, createMemo, createSignal, getOwner, Show } from "solid-js";
+import { Component, createEffect, createMemo, createSignal, For, getOwner, Show } from "solid-js";
 
 import logo from "./logo.svg";
 import styles from "./App.module.css";
@@ -9,9 +9,13 @@ const [sharedCounter, setSharedCounter] = createSignal(0);
 const Counter = () => {
   const [count, setCount] = createSignal(0, { name: "$count" });
 
-  createEffect(() => {
-    console.log(count());
-  });
+  createEffect(
+    () => {
+      console.log(count());
+    },
+    undefined,
+    { name: "EFFECT" }
+  );
 
   return (
     <button class="btn" onclick={() => setCount(p => ++p)}>
@@ -31,6 +35,19 @@ const ShowInfo: Component<{ shown: boolean }> = props => {
     { name: "_text-memo_" }
   );
   return <p>{text()}</p>;
+};
+
+const Dots: Component<{ n: number }> = props => {
+  const dots = createMemo(() => new Array(props.n), undefined, { name: "dots" });
+  return createMemo(
+    () => (
+      <div class="wrapper-h space-x-2">
+        <For each={dots()}>{_ => <Counter></Counter>}</For>
+      </div>
+    ),
+    undefined,
+    { name: "render memo" }
+  );
 };
 
 const App: Component = () => {
@@ -53,7 +70,9 @@ const App: Component = () => {
               </button>
             </Wrapper>
           </Show>
+          <p class="caption">{show() ? "show = true" : "show = false"}</p>
           <ShowInfo shown={show()} />
+          <Dots n={sharedCounter()} />
         </div>
       </header>
     </div>

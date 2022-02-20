@@ -1,6 +1,6 @@
 import { omit } from "@solid-primitives/immutable";
 import { createSubRoot } from "@solid-primitives/rootless";
-import { Fn, Get, isFunction } from "@solid-primitives/utils";
+import { Fn, Get, includes, isFunction, forEachEntry } from "@solid-primitives/utils";
 import {
   getOwner,
   JSX,
@@ -16,113 +16,185 @@ import {
   runComputation,
   updateComputation,
   runWithOwner,
-  batch
+  createEffect,
+  batch,
+  on,
+  $DEVCOMP
 } from "solid-js";
 import { createMutable, createStore, DeepReadonly } from "solid-js/store";
 import type { Computation, Owner, SignalState } from "solid-js/types/reactive/signal";
-import { Portal } from "solid-js/web";
-
-const serializeGraph = DEV.serializeGraph;
 
 let OWNER: Owner | null;
 
-const getComponentName = (owner: Owner): string => {
+const getOwnerName = (owner: Owner): string => {
   const { name, componentName } = owner;
   let result = "";
   if (componentName)
-    result += `<${componentName.startsWith("_Hot$$") ? componentName.slice(6) : componentName}/>`;
+    result += componentName.startsWith("_Hot$$") ? componentName.slice(6) : componentName;
   else if (name) result += name;
   return result || "(anonymous)";
 };
 
-const isComponent = (owner: Record<string, any>): boolean =>
-  "componentName" in owner && typeof owner.value === "function";
+const checkEqual = (a: any, b: any): boolean => a === b || (a.length === 0 && b.length === 0);
+
+const isComponent = (o: Record<string, any>): boolean =>
+  "componentName" in o && isFunction(o.value);
+
+const getOwnerType = (o: Owner, parentType?: OwnerType): OwnerType => {
+  if (o.name?.startsWith("sr-cl:") && !o.name.includes("-", 6)) return "refresh";
+  if (isComponent(o)) return "component";
+  if ("value" in o && "comparator" in o && o.pure === true) return "memo";
+  if (o.user === true && o.pure === false) return "effect";
+  if (
+    o.pure === false &&
+    o.fn + "" === "(current) => insertExpression(parent, accessor(), current, marker)" &&
+    includes(["component", "refresh"], parentType)
+  )
+    return "render";
+  return "computation";
+};
 
 const addCleanupFn = (o: Owner, fn: () => void) => {
   if (o.cleanups) o.cleanups.push(fn);
   else o.cleanups = [fn];
 };
-const addStateObserver = (state: SignalState<unknown>, fn: Get<unknown>) => {
+type State = SignalState<unknown> & { _value_listeners?: Set<Get<unknown>> };
+type StateListener = Get<unknown>;
+const addStateObserver = (state: State, fn: StateListener) => {
+  if (state._value_listeners) return state._value_listeners.add(fn);
+  state._value_listeners = new Set([fn]);
   let value = state.value;
   Object.defineProperty(state, "value", {
     get: () => value,
-    set: a => {
-      if (value !== a) (value = a), fn(a);
+    set(a) {
+      if (value !== a) {
+        value = a;
+        state._value_listeners!.forEach(fn => fn(a));
+      }
     }
   });
 };
+const removeStateObserver = (state: State, fn: StateListener) => state._value_listeners?.delete(fn);
 
 export type OwnerGraph = {
+  ref: Owner;
+  type: OwnerType;
   name: string;
   state: Record<string, Accessor<any>>;
-  children: Accessor<OwnerGraphChildren>;
+  owned: Accessor<OwnerGraphChildren>;
   value?: Accessor<unknown>;
+  dependencies: Accessor<OwnerDependencies>;
+  dependents?: Accessor<OwnerDependents>;
 };
 export type OwnerGraphChildren = OwnerGraph[];
 export type OwnerGraphValue = Accessor<unknown> | undefined;
+export type OwnerGraphState = {
+  value: Accessor<any>;
+  setValue: Get<any>;
+};
+export type OwnerType = "memo" | "component" | "computation" | "effect" | "refresh" | "render";
+export type OwnerDependencies = SignalState<unknown>[];
+export type OwnerDependents = Computation<unknown>[];
 
-const getChildrenGraph = (owner: Owner): OwnerGraphChildren => {
+const getChildrenGraph = (owner: Owner, parentType?: OwnerType): OwnerGraphChildren => {
   const initial: OwnerGraphChildren = [];
   owner.owned?.forEach(c => {
-    const graph = mapOwnerTree(c);
+    const graph = mapOwnerTree(c, parentType);
     initial.push(graph);
   });
   return initial;
 };
 
-function mapChildren(owner: Owner): [Accessor<OwnerGraphChildren>, OwnerGraphValue] {
-  let onChange: Get<unknown>;
+function mapChildren(
+  owner: Owner & Computation<unknown> & SignalState<unknown>,
+  parentType?: OwnerType
+) {
+  const onChange: Get<unknown>[] = [];
   let value: OwnerGraphValue;
+  let dependents: Accessor<OwnerDependents> | undefined;
 
-  const [children, setChildren] = createSignal<OwnerGraphChildren>(getChildrenGraph(owner), {
-    equals: (a, b) => a === b || (a.length === 0 && b.length === 0)
-  });
+  const [children, setChildren] = createSignal<OwnerGraphChildren>(
+    getChildrenGraph(owner, parentType),
+    { equals: checkEqual }
+  );
+  const updateChildren = () => setChildren(getChildrenGraph(owner, parentType));
+  onChange.push(updateChildren);
 
-  const parseValue = (v: unknown) => (isFunction(v) ? undefined : v);
+  if ("value" in owner) {
+    if (isComponent(owner)) {
+      value = owner.value;
+    } else {
+      const [v, setValue] = createSignal(owner.value);
+      onChange.push(v => setValue(() => v));
+      value = v;
 
-  if (!isComponent(owner) && "value" in owner) {
-    const [v, setValue] = createSignal(parseValue(owner.value));
-    onChange = v =>
-      batch(() => {
-        setChildren(getChildrenGraph(owner));
-        setValue(parseValue(v));
-      });
-    value = v;
-  } else {
-    onChange = () => setChildren(getChildrenGraph(owner));
+      if ("observers" in owner) {
+        const [d, setDependents] = createSignal<OwnerDependents>(owner.observers ?? []);
+        onChange.push(() => queueMicrotask(() => setDependents(owner.observers ?? [])));
+        dependents = d;
+      }
+    }
   }
-  addStateObserver(owner, onChange);
 
-  return [children, value];
+  addStateObserver(owner, v => onChange.forEach(fn => fn(v)));
+
+  return { children, value, dependents };
 }
 
-function mapOwnerTree(start: Owner): OwnerGraph {
-  return createRoot(dispose => {
-    const name = getComponentName(start);
-    const { owned, sourceMap } = start;
+const trackDependencies = (owner: Owner & Computation<unknown>): Accessor<OwnerDependencies> => {
+  const [dependencies, setDependencies] = createSignal<OwnerDependencies>([]);
 
-    addCleanupFn(start, dispose);
-    const [children, value] = mapChildren(start);
+  let runRequests = 0;
+  const stateListener = () => {
+    runRequests++;
+    queueMicrotask(() => {
+      if (--runRequests > 0) return;
+      setDependencies(owner.sources ?? []);
+      mapDependencies();
+    });
+  };
+
+  let prevSources: State[] = [];
+  const mapDependencies = () => {
+    prevSources.forEach(s => removeStateObserver(s, stateListener));
+    const sources = (prevSources = owner.sources ?? []);
+    sources.forEach(s => addStateObserver(s, stateListener));
+  };
+  stateListener();
+
+  return dependencies;
+};
+
+function mapOwnerTree(
+  owner: Owner & Computation<unknown> & SignalState<unknown>,
+  parentType?: OwnerType
+): OwnerGraph {
+  return createRoot(dispose => {
+    addCleanupFn(owner, dispose);
+
+    const name = getOwnerName(owner);
+    const type = getOwnerType(owner, parentType);
+    const sourceMap = owner.sourceMap ?? {};
+
+    const { children, value, dependents } = mapChildren(owner, type);
+    const dependencies = trackDependencies(owner);
 
     const node: OwnerGraph = {
+      ref: owner,
+      type,
       name,
       state: {},
-      children,
-      value
+      owned: children,
+      value,
+      dependencies,
+      dependents
     };
 
-    // TODO: dom elements
-    // if (start.componentName && start.fn) {
-    //   console.log(getComponentName(start), start.fn()?.());
-    // console.log(start.value());
-    // }
-
-    if (sourceMap)
-      Object.entries(sourceMap).forEach(([key, state]) => {
-        const [value, setValue] = createSignal(state.value);
-        node.state[key] = value;
-        addStateObserver(state, () => setValue(() => state.value));
-      });
+    forEachEntry(sourceMap, (key, state) => {
+      const [value, setValue] = createSignal(state.value);
+      node.state[key] = value;
+      addStateObserver(state, () => setValue(() => state.value));
+    });
 
     return node;
   });
@@ -131,11 +203,5 @@ function mapOwnerTree(start: Owner): OwnerGraph {
 export const createOwnerGraph = (owner: Owner) => {
   OWNER = owner;
 
-  const ownerTree: { root: OwnerGraph | undefined } = createMutable<{
-    root: OwnerGraph | undefined;
-  }>({
-    root: mapOwnerTree(owner)
-  });
-
-  return ownerTree.root;
+  return mapOwnerTree(owner);
 };
